@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import time
 import shutil
 import requests
 import threading
@@ -16,7 +17,6 @@ def sanitizar_nome(nome):
     return re.sub(r'[\\/*?:"<>|]', "", nome).strip()
 
 def limpar_termo_para_busca(titulo, artista):
-    # Remove sufixos comuns que poluem a busca do YouTube
     padroes_para_remover = [
         r'\(feat\..*?\)', r'\[feat\..*?\]',
         r'\(with.*?\)', r'\[with.*?\]',
@@ -32,7 +32,6 @@ def limpar_termo_para_busca(titulo, artista):
     for padrao in padroes_para_remover:
         texto_limpo = re.sub(padrao, '', texto_limpo, flags=re.IGNORECASE).strip()
         
-    # Pega apenas o primeiro artista principal caso venha uma lista enorme
     artistas_split = re.split(r'[,&/]', artista)
     artista_principal = artistas_split[0].strip() if artistas_split else artista.strip()
     
@@ -71,33 +70,101 @@ def obter_faixas_spotify_embed(url_playlist):
         raise Exception("Formato de URL do Spotify inválido!")
     
     playlist_id = match.group(1)
-    embed_url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
-    headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)'}
-    
-    response = requests.get(embed_url, headers=headers)
-    if response.status_code != 200:
-        raise Exception(f"Erro ao acessar Spotify Embed ({response.status_code})")
-        
-    soup = BeautifulSoup(response.text, 'html.parser')
-    next_data = soup.find('script', id='__NEXT_DATA__')
-    
-    tracks_info = []
+    session = requests.Session()
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36',
+        'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7'
+    }
+
     nome_playlist = "Spotify_Playlist"
-    
-    if next_data and next_data.string:
-        data = json.loads(next_data.string)
-        entity = data.get('props', {}).get('pageProps', {}).get('state', {}).get('data', {}).get('entity', {})
-        nome_playlist = entity.get('title') or entity.get('name') or "Spotify_Playlist"
-        for item in entity.get('trackList', []):
-            titulo = item.get('title', '').strip()
-            artista = item.get('subtitle', '').strip()
-            if titulo:
-                tracks_info.append({
-                    'titulo': titulo,
-                    'artista': artista,
-                    'busca_otimizada': limpar_termo_para_busca(titulo, artista),
-                    'busca_completa': f"{titulo} - {artista}" if artista else titulo
-                })
+    token_anonimo = None
+
+    try:
+        token_res = session.get("https://open.spotify.com/get_access_token", headers=headers, timeout=10)
+        if token_res.status_code == 200:
+            token_anonimo = token_res.json().get('accessToken')
+    except Exception:
+        token_anonimo = None
+
+    try:
+        embed_url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
+        embed_res = session.get(embed_url, headers=headers, timeout=10)
+        if embed_res.status_code == 200:
+            soup = BeautifulSoup(embed_res.text, 'html.parser')
+            next_data = soup.find('script', id='__NEXT_DATA__')
+            if next_data and next_data.string:
+                data = json.loads(next_data.string)
+                entity = data.get('props', {}).get('pageProps', {}).get('state', {}).get('data', {}).get('entity', {})
+                nome_playlist = entity.get('title') or entity.get('name') or "Spotify_Playlist"
+    except Exception:
+        pass
+
+    tracks_info = []
+
+    if token_anonimo:
+        api_headers = {
+            'Authorization': f'Bearer {token_anonimo}',
+            'User-Agent': headers['User-Agent']
+        }
+        offset = 0
+        limit = 100
+
+        while True:
+            api_url = f"https://api.spotify.com/v1/playlists/{playlist_id}/tracks?offset={offset}&limit={limit}"
+            res = session.get(api_url, headers=api_headers, timeout=10)
+            if res.status_code != 200:
+                break
+            
+            data = res.json()
+            items = data.get('items', [])
+            if not items:
+                break
+
+            for item in items:
+                track = item.get('track')
+                if not track:
+                    continue
+                
+                titulo = track.get('name', '').strip()
+                artistas = [a.get('name', '').strip() for a in track.get('artists', []) if a.get('name')]
+                artista = ", ".join(artistas)
+                
+                if titulo:
+                    tracks_info.append({
+                        'titulo': titulo,
+                        'artista': artista,
+                        'busca_otimizada': limpar_termo_para_busca(titulo, artista),
+                        'busca_completa': f"{titulo} - {artista}" if artista else titulo
+                    })
+
+            offset += limit
+            if offset >= data.get('total', 0):
+                break
+
+    if not tracks_info:
+        embed_url = f"https://open.spotify.com/embed/playlist/{playlist_id}"
+        response = session.get(embed_url, headers=headers, timeout=10)
+        if response.status_code != 200:
+            raise Exception(f"Erro ao acessar Spotify Embed ({response.status_code})")
+            
+        soup = BeautifulSoup(response.text, 'html.parser')
+        next_data = soup.find('script', id='__NEXT_DATA__')
+        
+        if next_data and next_data.string:
+            data = json.loads(next_data.string)
+            entity = data.get('props', {}).get('pageProps', {}).get('state', {}).get('data', {}).get('entity', {})
+            nome_playlist = entity.get('title') or entity.get('name') or nome_playlist
+            for item in entity.get('trackList', []):
+                titulo = item.get('title', '').strip()
+                artista = item.get('subtitle', '').strip()
+                if titulo:
+                    tracks_info.append({
+                        'titulo': titulo,
+                        'artista': artista,
+                        'busca_otimizada': limpar_termo_para_busca(titulo, artista),
+                        'busca_completa': f"{titulo} - {artista}" if artista else titulo
+                    })
+
     return sanitizar_nome(nome_playlist), tracks_info
 
 
@@ -183,8 +250,9 @@ class DownloaderApp(ctk.CTk):
         self.lbl_concorrencia = ctk.CTkLabel(self.frame_opcoes, text="Paralelos:")
         self.lbl_concorrencia.pack(side="left", padx=(15, 2))
 
-        self.combo_threads = ctk.CTkComboBox(self.frame_opcoes, values=["1", "2", "3", "4"], width=65)
-        self.combo_threads.set("2")
+        # Recomendamos padrão '1' para evitar Rate Limit
+        self.combo_threads = ctk.CTkComboBox(self.frame_opcoes, values=["1", "2", "3"], width=65)
+        self.combo_threads.set("1")
         self.combo_threads.pack(side="left", padx=5)
 
         self.frame_progresso = ctk.CTkFrame(self)
@@ -310,8 +378,16 @@ class DownloaderApp(ctk.CTk):
             'nocheckcertificate': True,
             'quiet': True,
             'no_warnings': True,
-            'extractor_args': {'youtube': {'player_client': ['tv', 'web', 'android']}},
-            'concurrent_fragment_downloads': 4,
+            'extractor_args': {
+                'youtube': {
+                    'player_client': ['ios', 'android', 'web']
+                }
+            },
+            # Adiciona pausas automáticas entre requisições para evitar Rate Limit
+            'sleep_interval': 3,
+            'max_sleep_interval': 6,
+            'sleep_interval_requests': 2,
+            'concurrent_fragment_downloads': 2,
             'progress_hooks': [self.hook_download],
         }
         
@@ -351,7 +427,7 @@ class DownloaderApp(ctk.CTk):
         os.makedirs(pasta_destino, exist_ok=True)
         
         total_faixas = len(faixas)
-        self.log(f"📂 [Spotify] '{nome_playlist}' ({total_faixas} músicas)")
+        self.log(f"📂 [Spotify] '{nome_playlist}' ({total_faixas} músicas identificadas)")
         opts = self.get_ydl_opts(pasta_destino, apenas_uma_musica=True)
         
         with YoutubeDL(opts) as ydl:
@@ -377,43 +453,65 @@ class DownloaderApp(ctk.CTk):
                     self.log(f"  ⏭️ [{nome_playlist}] ({idx}/{total_faixas}) Já existe: {titulo}")
                     continue
                 
-                # Lista de queries em cascata para cobrir variações como "2020", "Audio Oficial", etc.
+                # Estratégia de busca otimizada (reduz número de chamadas para evitar rate limit)
                 queries_teste = []
                 if usar_extended:
-                    queries_teste.append(f"ytsearch5:{busca_otimizada} extended")
-                queries_teste.append(f"ytsearch5:{busca_otimizada} audio")
+                    queries_teste.append(f"ytsearch3:{busca_otimizada} extended")
                 queries_teste.append(f"ytsearch3:{busca_otimizada}")
-                queries_teste.append(f"ytsearch3:{busca_completa}")
                 
                 video_escolhido = None
                 
                 for query in queries_teste:
-                    try:
-                        info = ydl.extract_info(query, download=False)
-                        entradas = info.get('entries', []) if info else []
-                        
-                        for entrada in entradas:
-                            if not entrada:
-                                continue
-                            duracao = entrada.get('duration')
-                            if limite_segundos is None or duracao is None or duracao <= limite_segundos:
-                                video_escolhido = entrada
+                    tentativa_rate_limit = 0
+                    while tentativa_rate_limit < 2:
+                        try:
+                            # Pequeno delay antes da busca de catálogo
+                            time.sleep(1.5)
+                            info = ydl.extract_info(query, download=False)
+                            entradas = info.get('entries', []) if info else []
+                            
+                            for entrada in entradas:
+                                if not entrada:
+                                    continue
+                                duracao = entrada.get('duration')
+                                if limite_segundos is None or duracao is None or duracao <= limite_segundos:
+                                    video_escolhido = entrada
+                                    break
+                            break # Sai do loop de tentativa se deu certo
+                        except Exception as err_busca:
+                            msg_err = str(err_busca).lower()
+                            if "rate-limited" in msg_err or "try again later" in msg_err or "429" in msg_err:
+                                self.log("  ⏳ [RATE LIMIT DETECTADO] YouTube solicitou pausa. Aguardando 45s para resfriar conexão...")
+                                time.sleep(45)
+                                tentativa_rate_limit += 1
+                            else:
                                 break
                         
-                        if video_escolhido:
-                            break
-                    except Exception:
-                        continue
+                    if video_escolhido:
+                        break
                 
                 if video_escolhido:
                     url_vid = video_escolhido.get('webpage_url') or video_escolhido.get('url')
                     dur_str = formatar_tempo(video_escolhido.get('duration'))
                     self.log(f"  ⬇️ [{nome_playlist}] ({idx}/{total_faixas}) Baixando [{dur_str}]: {titulo}")
-                    try:
-                        ydl.download([url_vid])
-                    except Exception as e:
-                        self.log(f"  ❌ [{nome_playlist}] ({idx}/{total_faixas}) Falha ao baixar stream: {e}")
-                        self.registrar_nao_baixada(nome_playlist, busca_completa, f"Falha no stream: {e}")
+                    
+                    sucesso_download = False
+                    for tentativa_dl in range(2):
+                        try:
+                            ydl.download([url_vid])
+                            sucesso_download = True
+                            break
+                        except Exception as e:
+                            msg_e = str(e).lower()
+                            if "rate-limited" in msg_e or "try again later" in msg_e or "429" in msg_e:
+                                self.log("  ⏳ [RATE LIMIT DETECTADO] Aguardando 60s antes de tentar baixar a faixa novamente...")
+                                time.sleep(60)
+                            else:
+                                self.log(f"  ❌ [{nome_playlist}] ({idx}/{total_faixas}) Falha ao baixar stream: {e}")
+                                break
+                    
+                    if not sucesso_download:
+                        self.registrar_nao_baixada(nome_playlist, busca_completa, "Bloqueio de requisição/Rate-Limit do YouTube")
                 else:
                     self.log(f"  ⚠️ [{nome_playlist}] ({idx}/{total_faixas}) Não encontrado no YouTube: {titulo}")
                     self.registrar_nao_baixada(nome_playlist, busca_completa, "Nenhum resultado válido encontrado no YouTube")
