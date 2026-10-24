@@ -173,6 +173,9 @@ class DownloaderApp(ctk.CTk):
         self.chk_extended.select()
         self.chk_extended.pack(side="left", padx=10, pady=8)
 
+        self.chk_radio_edit = ctk.CTkCheckBox(self.frame_opcoes, text="Priorizar 'radio edit' no Spotify")
+        self.chk_radio_edit.pack(side="left", padx=10, pady=8)
+
         self.lbl_duracao = ctk.CTkLabel(self.frame_opcoes, text="Duração Máx:")
         self.lbl_duracao.pack(side="left", padx=(10, 2))
 
@@ -250,20 +253,21 @@ class DownloaderApp(ctk.CTk):
         
         num_threads = int(self.combo_threads.get())
         usar_extended = bool(self.chk_extended.get())
+        usar_radio_edit = bool(self.chk_radio_edit.get())
         limite_segundos = self.obter_limite_segundos()
 
         threading.Thread(
             target=self.gerenciar_fila, 
-            args=(links, num_threads, usar_extended, limite_segundos), 
+            args=(links, num_threads, usar_extended, usar_radio_edit, limite_segundos), 
             daemon=True
         ).start()
 
-    def gerenciar_fila(self, links, num_threads, usar_extended, limite_segundos):
+    def gerenciar_fila(self, links, num_threads, usar_extended, usar_radio_edit, limite_segundos):
         txt_limite = f"{limite_segundos//60} min" if limite_segundos else "Sem Limite"
         self.log(f"\n🚀 Iniciando fila com {len(links)} link(s) | Limite por faixa: {txt_limite} | Paralelos: {num_threads}...")
         
         with ThreadPoolExecutor(max_workers=num_threads) as executor:
-            executor.map(lambda url: self.processar_link(url, usar_extended, limite_segundos), links)
+            executor.map(lambda url: self.processar_link(url, usar_extended, usar_radio_edit, limite_segundos), links)
             
         if self.abortar_por_disco.is_set():
             self.log("\n🛑 Download interrompido: Disco cheio!")
@@ -320,13 +324,13 @@ class DownloaderApp(ctk.CTk):
             
         return opts
 
-    def processar_link(self, url, usar_extended, limite_segundos):
+    def processar_link(self, url, usar_extended, usar_radio_edit, limite_segundos):
         if self.abortar_por_disco.is_set():
             return
 
         try:
             if "spotify.com/playlist/" in url:
-                self.processar_playlist_spotify(url, usar_extended, limite_segundos)
+                self.processar_playlist_spotify(url, usar_extended, usar_radio_edit, limite_segundos)
             elif "youtube.com/playlist" in url or ("list=" in url and "watch?v=" not in url):
                 self.processar_playlist_youtube(url, limite_segundos)
             elif "youtube.com/watch" in url or "youtu.be/" in url:
@@ -338,7 +342,7 @@ class DownloaderApp(ctk.CTk):
             self.log(f"❌ Erro ao processar '{url}': {e}")
             self.registrar_nao_baixada("Erro Link", url, str(e))
 
-    def processar_playlist_spotify(self, url, usar_extended, limite_segundos):
+    def processar_playlist_spotify(self, url, usar_extended, usar_radio_edit, limite_segundos):
         self.log(f"🔍 Identificando Spotify: {url}")
         try:
             nome_playlist, faixas = obter_faixas_spotify_embed(url)
@@ -381,6 +385,8 @@ class DownloaderApp(ctk.CTk):
                 queries_teste = []
                 if usar_extended:
                     queries_teste.append(f"ytsearch5:{busca_otimizada} extended")
+                if usar_radio_edit:
+                    queries_teste.append(f"ytsearch5:{busca_otimizada} radio edit")
                 queries_teste.append(f"ytsearch5:{busca_otimizada} audio")
                 queries_teste.append(f"ytsearch3:{busca_otimizada}")
                 queries_teste.append(f"ytsearch3:{busca_completa}")
